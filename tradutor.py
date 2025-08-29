@@ -4,15 +4,16 @@ import json
 import time
 import tempfile
 from pathlib import Path
-from ebooklib import epub
-from bs4 import BeautifulSoup
+from typing import List, Tuple, Dict
+
+from ebooklib import epub, ITEM_DOCUMENT
+from bs4 import BeautifulSoup, NavigableString, Comment
 from transformers import pipeline
 from tqdm import tqdm
 import re
 
 # Importações essenciais no topo
 import torch
-from transformers import pipeline
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QTextEdit, 
@@ -21,6 +22,10 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QPalette, QColor
 
+
+# ===========================
+# Thread de Tradução
+# ===========================
 class TranslationWorker(QThread):
     """Thread para processamento da tradução em segundo plano"""
     progress_updated = pyqtSignal(int, int, str)
@@ -44,6 +49,10 @@ class TranslationWorker(QThread):
     def stop(self):
         self.is_running = False
 
+
+# ===========================
+# Lógica de Tradução
+# ===========================
 class EbookTranslator:
     def __init__(self, model_name=None):
         # Lista de modelos prioritários PARA INGLÊS → PORTUGUÊS
@@ -55,242 +64,236 @@ class EbookTranslator:
         self.model_name = model_name
         self.translator = None
         self.progress_file = "translation_progress.json"
-        self.batch_size = 2
-        self.max_length = 400
-        
+
+        # parâmetros
+        self.batch_size = 8          # mais eficiente para muitos nós curtos
+        self.max_length = 400        # limite por item de tradução
+
+        # tags a ignorar (não traduzir)
+        self._skip_parent_tags = {"script", "style", "code", "pre", "svg", "math"}
+    
+    # ---------- Modelo ----------
     def initialize_translator(self):
         """Inicializa o tradutor para Inglês→Português"""
-        try:
-            print("🌎 Procurando melhor modelo Inglês→Português...")
-            
-            models_to_try = [
-                "Helsinki-NLP/opus-mt-tc-big-en-pt",  # Primeira escolha
-                "Helsinki-NLP/opus-mt-en-pt",         # Segunda escolha  
-                "Helsinki-NLP/opus-mt-en-ROMANCE",    # Terceira escolha
-            ]
-            
-            if self.model_name and self.model_name not in models_to_try:
-                models_to_try.insert(0, self.model_name)
-            
-            for model in models_to_try:
-                try:
-                    print(f"🔄 Tentando: {model}")
-                    self.translator = pipeline(
-                        "translation", 
-                        model=model,
-                        device=0 if torch.cuda.is_available() else -1
-                    )
-                    
-                    # Teste de tradução específico
-                    test_text = "The book is excellent"
-                    result = self.translator(test_text, max_length=50)
-                    translation = result[0]['translation_text']
-                    
-                    print(f"✅ {model} funcionando! '{test_text}' → '{translation}'")
-                    
-                    # Verifica se está em português
-                    if any(pt_char in translation for pt_char in 'ãõáéíóúâêîôû'):
-                        print("   ✅ Tradução em português detectada")
-                    else:
-                        print("   ⚠️  Tradução pode não estar em português")
-                    
-                    self.model_name = model
-                    return
-                    
-                except Exception as e:
-                    print(f"❌ {model} falhou: {str(e)[:80]}...")
-                    continue
-            
-            raise Exception("Nenhum modelo Inglês→Português pôde ser carregado")
-            
-        except Exception as e:
-            print(f"💥 Falha crítica: {e}")
-            raise
+        print("🌎 Procurando melhor modelo Inglês→Português...")
+        models_to_try = [
+            "Helsinki-NLP/opus-mt-tc-big-en-pt",
+            "Helsinki-NLP/opus-mt-en-pt",
+            "Helsinki-NLP/opus-mt-en-ROMANCE",
+        ]
+        if self.model_name and self.model_name not in models_to_try:
+            models_to_try.insert(0, self.model_name)
         
-    def translate_text(self, text, model_name):
-        """Traduz texto com tratamento específico para cada modelo"""
-        try:
-            if "ROMANCE" in model_name:
-                # Para modelos multilíngues, forçar português
-                result = self.translator(text, max_length=50)
+        for model in models_to_try:
+            try:
+                print(f"🔄 Tentando: {model}")
+                self.translator = pipeline(
+                    "translation",
+                    model=model,
+                    device=0 if torch.cuda.is_available() else -1
+                )
+                test_text = "The book is excellent"
+                result = self.translator(test_text, max_length=50)
                 translation = result[0]['translation_text']
-                
-                # Se a tradução não estiver em português, tentar forçar
-                if not any(char in translation for char in 'ãõáéíóúâêîôûàèìòù'):
-                    print("⚠️  Tradução não parece estar em português, ajustando...")
-                    # Adicionar dica para forçar português
-                    result = self.translator(f"{text} [PT]", max_length=50)
-                    translation = result[0]['translation_text']
-                
-                return translation
-            else:
-                # Para modelos específicos EN-PT
-                result = self.translator(text, max_length=50)
-                return result[0]['translation_text']
-                
-        except Exception as e:
-            print(f"Erro na tradução de teste: {e}")
-            return f"[ERRO: {str(e)[:50]}]"
-    
-    def extract_text_from_epub(self, epub_path):
-        book = epub.read_epub(epub_path)
-        chapters_text = []
+                print(f"✅ {model} funcionando! '{test_text}' → '{translation}'")
+                if any(pt_char in translation for pt_char in 'ãõáéíóúâêîôûàèìòù'):
+                    print("   ✅ Tradução em português detectada")
+                else:
+                    print("   ⚠️  Tradução pode não estar em português")
+                self.model_name = model
+                return
+            except Exception as e:
+                print(f"❌ {model} falhou: {str(e)[:80]}...")
+                continue
+        raise Exception("Nenhum modelo Inglês→Português pôde ser carregado")
 
-        for item in book.get_items():
-            # Força a verificação do caminho do arquivo
-            if item.get_name().startswith("Text/") and item.get_name().endswith(".xhtml"):
-                soup = BeautifulSoup(item.get_content(), 'html.parser')
-                text = soup.get_text(separator="\n").strip()
-                if text:
-                    chapters_text.append(text)
-        
-        return '\n\n'.join(chapters_text)
-    
-    def split_into_paragraphs(self, text):
-        paragraphs = re.split(r'\n\s*\n', text)
-        paragraphs = [p.strip() for p in paragraphs if p.strip()]
-        return paragraphs
-    
+    # ---------- Progresso ----------
     def load_progress(self):
         if os.path.exists(self.progress_file):
             try:
                 with open(self.progress_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except:
-                return {"translated_paragraphs": [], "current_index": 0, "total_paragraphs": 0}
-        return {"translated_paragraphs": [], "current_index": 0, "total_paragraphs": 0}
+                return {"doc_index": 0, "node_index": 0, "doc_order": []}
+        return {"doc_index": 0, "node_index": 0, "doc_order": []}
     
     def save_progress(self, progress_data):
         with open(self.progress_file, 'w', encoding='utf-8') as f:
             json.dump(progress_data, f, ensure_ascii=False, indent=2)
-    
-    def translate_batch(self, paragraphs, callback=None):
+
+    # ---------- Coleta e substituição de nós ----------
+    def _gather_text_nodes(self, soup: BeautifulSoup) -> List[NavigableString]:
+        """
+        Coleta todos os NavigableString traduzíveis, preservando estrutura.
+        Ignora comentários, espaços puros e nós dentro de tags a pular.
+        """
+        text_nodes: List[NavigableString] = []
+        for node in soup.find_all(string=True):
+            if isinstance(node, Comment):
+                continue
+            text = str(node)
+            if not text or not text.strip():
+                continue
+            parent = node.parent
+            if parent and parent.name and parent.name.lower() in self._skip_parent_tags:
+                continue
+            # opcional: evitar traduzir atributos ALT de imagens aqui (não estão em NavigableString)
+            text_nodes.append(node)
+        return text_nodes
+
+    def _batch_translate(self, strings: List[str]) -> List[str]:
+        if not strings:
+            return []
         if not self.translator:
             self.initialize_translator()
-        
-        try:
-            if "ROMANCE" in self.model_name:
-                # Para modelos multilíngues, adicionar dica de idioma
-                paragraphs_with_hint = [f"{text} [PT]" for text in paragraphs]
-                translations = self.translator(
-                    paragraphs_with_hint,
-                    max_length=self.max_length,
-                    batch_size=self.batch_size,
-                    truncation=True
-                )
-            else:
-                # Para modelos específicos EN-PT
-                translations = self.translator(
-                    paragraphs,
-                    max_length=self.max_length,
-                    batch_size=self.batch_size,
-                    truncation=True
-                )
-            
-            translated_texts = [t['translation_text'] for t in translations]
-            return translated_texts
-            
-        except Exception as e:
-            print(f"Erro na tradução: {e}")
-            return paragraphs  # Retorna o texto original em caso de erro
+        if "ROMANCE" in self.model_name:
+            inputs = [s + " [PT]" for s in strings]
+        else:
+            inputs = strings
+        outputs = self.translator(
+            inputs,
+            max_length=self.max_length,
+            batch_size=self.batch_size,
+            truncation=True
+        )
+        return [o["translation_text"] for o in outputs]
 
-    def translate_ebook(self, input_file, output_file, callback=None):
-        """Traduz o ebook com callback para atualização de progresso"""
-        try:
-            # Extrai texto do EPUB
-            print("Extraindo texto do EPUB...")
+    # ---------- Tradução principal preservando EPUB ----------
+    def translate_ebook(self, input_file, output_file, callback: TranslationWorker | None = None):
+        """
+        Abre o EPUB original, percorre cada DOCUMENT (XHTML), traduz os nós de texto
+        e salva um NOVO EPUB preservando:
+          - manifest / spine / TOC (índice)
+          - diretórios (Images, Styles, Text, etc.)
+          - CSS, imagens, fontes, tudo que não for texto
+        """
+        # 1) Carrega o livro original
+        if callback:
+            callback.progress_updated.emit(0, 100, "Abrindo EPUB de origem...")
+        book = epub.read_epub(input_file)
+
+        # 2) Obtém todos os documentos do spine/manifest (XHTML)
+        documents = [it for it in book.get_items_of_type(ITEM_DOCUMENT)]
+
+        # Ordem estável por id/href (útil para retomar)
+        documents.sort(key=lambda x: (x.get_id() or "", x.get_name() or ""))
+
+        # 3) Planeja total de nós para barra de progresso
+        #    (coletando rapidamente a contagem — pode custar um pouco, mas dá precisão)
+        if callback:
+            callback.progress_updated.emit(0, 100, "Contando nós de texto...")
+        total_nodes = 0
+        doc_nodes_cache: Dict[str, int] = {}
+        for doc in documents:
+            soup = BeautifulSoup(doc.get_content(), 'html.parser')
+            n = len(self._gather_text_nodes(soup))
+            doc_nodes_cache[doc.get_id()] = n
+            total_nodes += n
+        if total_nodes == 0:
+            # nada para traduzir — apenas copia
+            epub.write_epub(output_file, book, {})
             if callback:
-                callback.progress_updated.emit(0, 100, "Extraindo texto do EPUB...")
-            
-            text_content = self.extract_text_from_epub(input_file)
-            paragraphs = self.split_into_paragraphs(text_content)
-            total_paragraphs = len(paragraphs)
-            
-            print(f"Total de parágrafos: {total_paragraphs}")
-            
-            # Carrega progresso
-            progress = self.load_progress()
-            translated_paragraphs = progress.get("translated_paragraphs", [])
-            start_index = progress.get("current_index", 0)
-            
-            # Verifica se precisa recomeçar
-            if progress.get("total_paragraphs", 0) != total_paragraphs:
-                start_index = 0
-                translated_paragraphs = []
-            
-            # Inicializa tradutor
-            self.initialize_translator()
-            
-            if callback:
-                callback.progress_updated.emit(start_index, total_paragraphs, "Iniciando tradução...")
-            
-            # Processa os parágrafos
-            for i in range(start_index, total_paragraphs, self.batch_size):
+                callback.translation_finished.emit(output_file)
+            return
+
+        # 4) Carrega/ajusta progresso
+        progress = self.load_progress()
+        doc_order = [d.get_id() for d in documents]
+        if progress.get("doc_order") != doc_order:
+            # se a ordem mudou, recomeça
+            progress = {"doc_index": 0, "node_index": 0, "doc_order": doc_order}
+
+        current_doc_index = progress["doc_index"]
+        current_node_index = progress["node_index"]
+
+        # 5) Inicializa o tradutor
+        self.initialize_translator()
+
+        # 6) Loop de tradução por documento / nós
+        translated_so_far = sum(doc_nodes_cache[documents[i].get_id()] for i in range(current_doc_index)) + current_node_index
+        if callback:
+            callback.progress_updated.emit(translated_so_far, total_nodes, "Iniciando tradução...")
+
+        for d_i in range(current_doc_index, len(documents)):
+            if callback and not callback.is_running:
+                break
+
+            doc = documents[d_i]
+            soup = BeautifulSoup(doc.get_content(), 'html.parser')
+            nodes = self._gather_text_nodes(soup)
+
+            # retoma do nó onde parou (apenas para o primeiro doc retomado)
+            start_node = current_node_index if d_i == current_doc_index else 0
+
+            # processa em lotes
+            idx = start_node
+            while idx < len(nodes):
                 if callback and not callback.is_running:
                     break
-                
-                batch = paragraphs[i:min(i + self.batch_size, total_paragraphs)]
-                
-                # Traduz o lote
-                translated_batch = self.translate_batch(batch)
-                translated_paragraphs.extend(translated_batch)
-                
-                # Atualiza progresso
-                progress = {
-                    "translated_paragraphs": translated_paragraphs,
-                    "current_index": i + len(batch),
-                    "total_paragraphs": total_paragraphs
-                }
-                self.save_progress(progress)
-                
-                # Emite sinal de progresso
-                if callback:
-                    progress_percent = int((i + len(batch)) / total_paragraphs * 100)
-                    callback.progress_updated.emit(
-                        i + len(batch), 
-                        total_paragraphs, 
-                        f"Traduzindo: {i + len(batch)}/{total_paragraphs}"
-                    )
-                
-                time.sleep(0.1)
-            
-            # Salva resultado final se a tradução foi completada
-            if callback and callback.is_running:
-                self.save_translated_epub(translated_paragraphs, output_file)
-                if os.path.exists(self.progress_file):
-                    os.remove(self.progress_file)
-                
-                if callback:
-                    callback.translation_finished.emit(output_file)
-            
-        except Exception as e:
-            if callback:
-                callback.error_occurred.emit(str(e))
-    
-    def save_translated_epub(self, translated_paragraphs, output_file):
-        """Cria um EPUB simples com o texto traduzido"""
-        book = epub.EpubBook()
-        
-        # Metadados
-        book.set_title('Livro Traduzido')
-        book.set_language('pt')
-        
-        # Cria capítulo com texto traduzido
-        translated_text = '\n\n'.join(translated_paragraphs)
-        chapter = epub.EpubHtml(
-            title='Conteúdo Traduzido',
-            file_name='chapter.xhtml',
-            lang='pt'
-        )
-        chapter.content = f'<html><body>{translated_text.replace(chr(10), "<br/>")}</body></html>'
-        
-        # Adiciona capítulo ao livro
-        book.add_item(chapter)
-        book.spine = [chapter]
-        
-        # Salva o EPUB
-        epub.write_epub(output_file, book, {})
 
+                batch_nodes = nodes[idx: idx + self.batch_size]
+                batch_texts = [str(n) for n in batch_nodes]
+
+                # traduz
+                try:
+                    translated = self._batch_translate(batch_texts)
+                except Exception as e:
+                    # em caso de erro, mantém original para esse batch
+                    translated = batch_texts
+                    print(f"Erro na tradução do lote: {e}")
+
+                # substitui mantendo estrutura
+                for node, new_text in zip(batch_nodes, translated):
+                    # preserva espaços à esquerda/direita do nó original
+                    left_ws = ""
+                    right_ws = ""
+                    if str(node).startswith((" ", "\t", "\n")):
+                        left_ws = re.match(r"^\s*", str(node)).group(0)
+                    if str(node).endswith((" ", "\t", "\n")):
+                        right_ws = re.search(r"\s*$", str(node)).group(0)
+                    node.replace_with(NavigableString(left_ws + new_text + right_ws))
+
+                # atualiza progresso
+                idx += len(batch_nodes)
+                translated_so_far += len(batch_nodes)
+                current_node_index = idx
+
+                self.save_progress({
+                    "doc_index": d_i,
+                    "node_index": current_node_index if idx < len(nodes) else 0,
+                    "doc_order": doc_order
+                })
+
+                if callback:
+                    callback.progress_updated.emit(
+                        translated_so_far,
+                        total_nodes,
+                        f"Traduzindo {doc.get_name()}  ({translated_so_far}/{total_nodes})"
+                    )
+
+                time.sleep(0.02)
+
+            # fim do documento: grava conteúdo traduzido de volta
+            doc.set_content(str(soup).encode("utf-8"))
+            current_node_index = 0  # próximo doc começa do zero
+
+        # 7) Se não foi interrompido, salva EPUB preservando estrutura
+        if callback and callback.is_running:
+            # nada de tocar em toc/spine/manifest — ebooklib reusa tudo do objeto
+            # inclusive Imagens, CSS, sources adicionais…
+            epub.write_epub(output_file, book, {})
+
+            # limpa progresso
+            if os.path.exists(self.progress_file):
+                os.remove(self.progress_file)
+
+            if callback:
+                callback.translation_finished.emit(output_file)
+
+
+# ===========================
+# Interface (PyQt5)
+# ===========================
 class TranslationApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -349,13 +352,10 @@ class TranslationApp(QMainWindow):
             "Helsinki-NLP/opus-mt-en-pt",         # 🥈 Modelo base
             "Helsinki-NLP/opus-mt-en-ROMANCE",    # 🥉 Multilíngue (fallback)
         ])
-
-        # Tooltips para ajudar o usuário
         self.model_combo.setItemData(0, "Modelo grande - Melhor qualidade", Qt.ToolTipRole)
         self.model_combo.setItemData(1, "Modelo base - Mais rápido", Qt.ToolTipRole)
         self.model_combo.setItemData(2, "Multilíngue - Usa se outros falharem", Qt.ToolTipRole)
-
-        self.model_combo.setCurrentIndex(0)  # Seleciona o melhor modelo por padrão
+        self.model_combo.setCurrentIndex(0)
         
         settings_layout.addWidget(self.model_label)
         settings_layout.addWidget(self.model_combo)
@@ -413,7 +413,6 @@ class TranslationApp(QMainWindow):
         )
         if file_path:
             self.input_path.setText(file_path)
-            # Sugere nome de saída automático
             output_path = file_path.replace('.epub', '_traduzido.epub')
             self.output_path.setText(output_path)
             self.log(f"Arquivo selecionado: {file_path}")
@@ -435,7 +434,6 @@ class TranslationApp(QMainWindow):
         if not input_file or not output_file:
             QMessageBox.warning(self, "Aviso", "Selecione os arquivos de entrada e saída!")
             return
-        
         if not input_file.endswith('.epub'):
             QMessageBox.warning(self, "Aviso", "O arquivo de entrada deve ser um EPUB!")
             return
@@ -461,7 +459,6 @@ class TranslationApp(QMainWindow):
         if not os.path.exists("translation_progress.json"):
             QMessageBox.information(self, "Informação", "Nenhum progresso anterior encontrado!")
             return
-        
         self.start_translation()
     
     def update_progress(self, current, total, message):
@@ -505,7 +502,6 @@ class TranslationApp(QMainWindow):
                 'A tradução está em andamento. Tem certeza que deseja sair?',
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No
             )
-            
             if reply == QMessageBox.Yes:
                 self.worker.stop()
                 self.worker.wait()
@@ -515,27 +511,30 @@ class TranslationApp(QMainWindow):
         else:
             event.accept()
 
+
+# ===========================
+# main()
+# ===========================
 def main():
     # Verificar dependências essenciais
     try:
-        import torch
-        from transformers import pipeline
-        from PyQt5 import QtWidgets
+        import torch  # noqa: F401
+        from transformers import pipeline  # noqa: F401
+        from PyQt5 import QtWidgets  # noqa: F401
         print("Todas as dependências estão instaladas! 🎉")
     except ImportError as e:
         print(f"ERRO: Dependência faltando: {e}")
-        print("Instale com: pip install torch transformers pyqt5")
+        print("Instale com: pip install torch transformers pyqt5 ebooklib beautifulsoup4")
         return
     
     app = QApplication(sys.argv)
-    
-    # Configura estilo visual
     app.setStyle('Fusion')
     
     window = TranslationApp()
     window.show()
     
     sys.exit(app.exec_())
+
 
 if __name__ == "__main__":
     main()

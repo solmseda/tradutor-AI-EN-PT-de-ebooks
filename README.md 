@@ -1,0 +1,18 @@
+# Tradutor de Ebooks AI
+
+Tradutor de ebooks EPUB do inglês para português usando Hugging Face.
+
+## Instalação
+
+```bash
+# Clonar repositório
+
+# Criar ambiente virtual
+python -m venv ebook-translator-env
+source ebook-translator-env/bin/activate
+
+# Instalar dependências
+pip install -r requirements.txt
+
+# Executar
+python src/main.py
