@@ -1,0 +1,88 @@
+# .gitignore
+
+# Ambiente virtual
+ebook-translator-env/
+venv/
+env/
+ENV/
+
+# Arquivos do Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Arquivos de treinamento de modelos
+*.pth
+*.pt
+*.bin
+*.h5
+*.keras
+
+# Cache do Hugging Face
+.cache/
+.huggingface/
+
+# Arquivos de progresso e temporários
+translation_progress.json
+*.tmp
+*.temp
+*.log
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db
+
+# Arquivos do IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Arquivos do PyCharm
+.idea/
+*.iml
+
+# Arquivos do Jupyter Notebook
+.ipynb_checkpoints/
+
+# Arquivos de dados grandes
+*.epub
+*.pdf
+*.mp4
+*.avi
+*.mov
+*.mp3
+*.wav
+
+# Não versionar ebooks de exemplo
+/downloads/
+/samples/
+/test_books/
+
+# Arquivos de configuração local
+config.local.py
+settings.local.py
+.env
+.secrets
+
+# Arquivos de log
+logs/
+*.log
